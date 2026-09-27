@@ -1,17 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import {getSelectedServer} from '@electron/tcn/ServerState';
 import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {
-	CANARY_APP_URL,
 	DEFAULT_WINDOW_HEIGHT,
 	DEFAULT_WINDOW_WIDTH,
 	MIN_WINDOW_HEIGHT,
 	MIN_WINDOW_WIDTH,
-	STABLE_APP_URL,
 } from '@electron/common/Constants';
-import {getAppUrl, getCustomAppUrl, getDesktopWindowBehaviorSettings} from '@electron/common/DesktopConfig';
+import {getAppUrl, getDesktopWindowBehaviorSettings} from '@electron/common/DesktopConfig';
 import {createChildLogger} from '@electron/common/Logger';
 import type {DesktopWindowBehaviorSettings} from '@electron/common/Types';
 import {
@@ -59,18 +58,6 @@ const CUSTOM_TITLEBAR_TRAFFIC_LIGHT_POSITION = {
 	x: 12,
 	y: Math.round((CUSTOM_TITLEBAR_HEIGHT_MAC - CUSTOM_TITLEBAR_TRAFFIC_LIGHT_DIAMETER) / 2),
 };
-const trustedWebOrigins = new Set(
-	[STABLE_APP_URL, CANARY_APP_URL]
-		.map((url) => {
-			try {
-				return new URL(url).origin;
-			} catch (error) {
-				log.error('Invalid trusted origin URL', {url, error});
-				return null;
-			}
-		})
-		.filter(Boolean) as Array<string>,
-);
 const webAuthnDeviceTypes = new Set(['hid', 'usb', 'serial', 'bluetooth']);
 const webAuthnPermissionTypes = new Set(['hid', 'usb', 'serial', 'bluetooth']);
 const trustedRendererPermissionTypes = new Set([
@@ -107,18 +94,7 @@ function getOrigin(url?: string): string | null {
 }
 
 export function isTrustedOrigin(url?: string): boolean {
-	const origin = getOrigin(url);
-	if (!origin) return false;
-	if (trustedWebOrigins.has(origin)) return true;
-	const customUrl = getCustomAppUrl();
-	if (customUrl) {
-		try {
-			return new URL(customUrl).origin === origin;
-		} catch {
-			return false;
-		}
-	}
-	return false;
+	return getOrigin(url) === getSelectedServer().origin;
 }
 
 function getSanitizedPath(rawUrl: string): string | null {
@@ -693,6 +669,7 @@ function getSharedWebPreferences(
 ): Electron.WebPreferences {
 	return {
 		preload: path.join(__dirname, '../preload/index.cjs'),
+		partition: getSelectedServer().partition,
 		enableBlinkFeatures: MEDIA_DEVICE_BLINK_FEATURES,
 		contextIsolation: true,
 		nodeIntegration: false,
@@ -1023,12 +1000,20 @@ export function createWindow(options: CreateWindowOptions = {}): BrowserWindow {
 		logPhase('load-url-dispatched');
 	};
 	void clearStartupRenderingCaches(session).then(loadAppUrl);
+	webContents.on('will-redirect', (event, url) => {
+		if (!isTrustedOrigin(url)) event.preventDefault();
+	});
 	webContents.on('will-navigate', (event, url) => {
 		if (!isTrustedOrigin(url)) {
 			event.preventDefault();
 		}
 	});
 	webContents.on('did-create-window', (window, details) => {
+		const blockUntrustedPopoutNavigation = (event: Electron.Event, url: string): void => {
+			if (url !== 'about:blank' && !isTrustedOrigin(url)) event.preventDefault();
+		};
+		window.webContents.on('will-navigate', blockUntrustedPopoutNavigation);
+		window.webContents.on('will-redirect', blockUntrustedPopoutNavigation);
 		if (
 			details.frameName === THEME_STUDIO_POPOUT_WINDOW_NAME &&
 			getSanitizedPath(details.url) === THEME_STUDIO_POPOUT_PATHNAME

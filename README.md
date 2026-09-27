@@ -1,3 +1,16 @@
+# TCN Chat desktop fork
+
+The Cantina Network maintains a source fork of Fluxer desktop with separate TCN
+identity, server selection, branding and an independently controlled update path.
+Start with the [TCN build and release guide](tcn/PUBLIC.md) and
+[patch maintenance](tcn/PATCHES.md). The active client is in fluxer_desktop/.
+
+Public Windows installers and automatic updates are not activated yet. Source
+publication does not establish installed or signed release acceptance. The Fluxer
+introduction below describes upstream; its downloads are not TCN builds.
+
+---
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./fluxer_static/marketing/branding/logo-white.svg">

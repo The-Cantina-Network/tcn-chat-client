@@ -1,0 +1,264 @@
+name: TCN desktop release
+
+# Publishing is deliberately manual and separate from creating a candidate.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Three-part TCN version (changed bytes require a new version)
+        type: string
+        required: true
+      channel:
+        description: Desktop update channel, independent of the selected chat server
+        type: choice
+        options: [both, canary, stable]
+        default: canary
+      unsigned_test:
+        description: Evaluation only; unsigned candidates can never publish
+        type: boolean
+        default: true
+      previous_version:
+        description: Existing installer version for real installed-upgrade acceptance
+        type: string
+        required: true
+      bootstrap_previous:
+        description: First release only; build a disposable preceding installer from this revision
+        type: boolean
+        default: false
+      publish:
+        description: Publish the verified signed candidate after environment approval
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tcn-desktop-release-${{ github.ref }}-${{ inputs.channel }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      channels: ${{ steps.plan.outputs.channels }}
+    steps:
+      - id: plan
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          UNSIGNED: ${{ inputs.unsigned_test }}
+          PUBLISH: ${{ inputs.publish }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$UNSIGNED" = true ] && [ "$PUBLISH" = true ]; then
+            echo 'Unsigned evaluations cannot be published.' >&2
+            exit 1
+          fi
+          case "$CHANNEL" in
+            both) echo 'channels=["stable","canary"]' >> "$GITHUB_OUTPUT" ;;
+            stable) echo 'channels=["stable"]' >> "$GITHUB_OUTPUT" ;;
+            canary) echo 'channels=["canary"]' >> "$GITHUB_OUTPUT" ;;
+            *) exit 1 ;;
+          esac
+
+  candidate:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: ${{ fromJSON(needs.plan.outputs.channels) }}
+    runs-on: windows-2025
+    environment: desktop-build-${{ matrix.channel }}
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      BUILD_CHANNEL: ${{ matrix.channel }}
+      RUSTUP_TOOLCHAIN: 1.98.1-x86_64-pc-windows-msvc
+      VERSION: ${{ inputs.version }}
+      DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false'
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      UNSIGNED_TEST: ${{ inputs.unsigned_test }}
+      PREVIOUS_VERSION: ${{ inputs.previous_version }}
+      FEED_URL: ${{ vars.TCN_UPDATE_FEED_URL }}
+      DOWNLOAD_PAGE_URL: ${{ vars.TCN_DOWNLOAD_PAGE_URL }}
+      SIGNER_THUMBPRINT: ${{ vars.TCN_SIGNER_THUMBPRINT }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: '10.0.401'
+      - name: Install pinned local build tools
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm install --prefix "$env:RUNNER_TEMP/tcn-node-tools" --no-save --ignore-scripts pnpm@11.27.0
+          if ($LASTEXITCODE -ne 0) { throw 'pnpm installation failed.' }
+          "$env:RUNNER_TEMP/tcn-node-tools/node_modules/.bin" >> $env:GITHUB_PATH
+          rustup toolchain install 1.98.1 --profile minimal --no-self-update
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Rust installation failed.' }
+          dotnet tool install vpk --version 1.2.0 --tool-path "$env:RUNNER_TEMP/velopack"
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Velopack installation failed.' }
+      - name: Restore locked dependencies
+        run: |
+          pnpm install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { throw 'Locked dependency installation failed.' }
+      - name: Verify release boundaries and updater routing
+        run: |
+          node --test tcn/scripts/releases/lineage.test.mjs tcn/scripts/releases/prepare-upstream.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Source provenance tests failed.' }
+          ./tcn/scripts/releases/test-release-helpers.ps1
+          Push-Location fluxer_desktop
+          try {
+            node --test --test-name-pattern='TCN|Updater Windows' src/main/Updater.test.mjs
+            if ($LASTEXITCODE -ne 0) { throw 'Updater behavior tests failed.' }
+            node --test src/main/Bootstrap.test.mjs
+            if ($LASTEXITCODE -ne 0) { throw 'Bootstrap startup/cache tests failed.' }
+          } finally { Pop-Location }
+      - name: Configure TCN release identity
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:FEED_URL) -or [string]::IsNullOrWhiteSpace($env:DOWNLOAD_PAGE_URL)) { throw 'Configure the reviewed TCN feed and download page in this channel environment.' }
+          $config = @{ schema = 'tcn-desktop-release/v1'; channel = $env:BUILD_CHANNEL; feedUrl = $env:FEED_URL; downloadPageUrl = $env:DOWNLOAD_PAGE_URL }
+          $config | ConvertTo-Json | Set-Content "$env:RUNNER_TEMP/tcn-release.json" -Encoding utf8
+      - name: Import signing certificate for signed candidates
+        if: ${{ !inputs.unsigned_test }}
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.TCN_WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.TCN_WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:CERTIFICATE_BASE64) -or $env:SIGNER_THUMBPRINT -notmatch '^[0-9a-fA-F]{40}$') { throw 'Configure the approved TCN signing identity before signed packaging.' }
+          $pfx = Join-Path $env:RUNNER_TEMP 'tcn-signing.pfx'
+          try {
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERTIFICATE_BASE64))
+            $password = ConvertTo-SecureString $env:CERTIFICATE_PASSWORD -AsPlainText -Force
+            $certificate = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+            if ($certificate.Thumbprint -notcontains $env:SIGNER_THUMBPRINT) { throw 'Signing certificate identity mismatch.' }
+          } finally {
+            if (Test-Path -LiteralPath $pfx) { Remove-Item -LiteralPath $pfx -Force }
+          }
+      - name: Build full native Windows client
+        run: |
+          ./tcn/scripts/build-native.ps1 -Version $env:VERSION -Channel $env:BUILD_CHANNEL -OutputDirectory "$env:RUNNER_TEMP/tcn-build" -ReleaseConfigPath "$env:RUNNER_TEMP/tcn-release.json" -RequireReleaseLineage:($env:UNSIGNED_TEST -ne 'true')
+      - name: Package and inspect installer and update payload
+        run: |
+          $arguments = @{ Version = $env:VERSION; Channel = $env:BUILD_CHANNEL; PackageDirectory = "$env:RUNNER_TEMP/tcn-build/win-unpacked"; VpkPath = "$env:RUNNER_TEMP/velopack/vpk.exe"; OutputDirectory = "$env:RUNNER_TEMP/tcn-candidate" }
+          if ($env:UNSIGNED_TEST -eq 'true') { $arguments.UnsignedTest = $true } else { $arguments.SignerThumbprint = $env:SIGNER_THUMBPRINT }
+          ./tcn/scripts/releases/pack-windows.ps1 @arguments
+      - name: Exercise the packaged native update engine
+        run: |
+          $executable = if ($env:BUILD_CHANNEL -eq 'canary') { 'TCN Chat Canary.exe' } else { 'TCN Chat.exe' }
+          $before = $env:ELECTRON_RUN_AS_NODE
+          try {
+            $env:ELECTRON_RUN_AS_NODE = '1'
+            & "$env:RUNNER_TEMP/tcn-candidate/verified-payload/$executable" "$env:GITHUB_WORKSPACE/tcn/scripts/releases/test-update-engine.cjs" --candidate "$env:RUNNER_TEMP/tcn-candidate" --output "$env:RUNNER_TEMP/tcn-update-engine" --current-version $env:PREVIOUS_VERSION
+            if ($LASTEXITCODE -ne 0) { throw 'Packaged native update-engine acceptance failed.' }
+          } finally { $env:ELECTRON_RUN_AS_NODE = $before }
+      - name: Download the exact preceding TCN installer
+        if: ${{ !inputs.bootstrap_previous }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $identity = if ($env:BUILD_CHANNEL -eq 'canary') { 'tcn_chat_desktop_canary' } else { 'tcn_chat_desktop' }
+          $previousTag = "desktop-$env:BUILD_CHANNEL-v$env:PREVIOUS_VERSION"
+          New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/tcn-previous" | Out-Null
+          gh release download $previousTag --repo $env:GITHUB_REPOSITORY --pattern '*-Setup.exe' --dir "$env:RUNNER_TEMP/tcn-previous"
+          if ($LASTEXITCODE -ne 0) { throw 'A real preceding installer is required; bootstrap acceptance must be prepared separately.' }
+      - name: Bootstrap a disposable preceding installer for the first release
+        if: ${{ inputs.bootstrap_previous }}
+        run: |
+          ./tcn/scripts/build-native.ps1 -Version $env:PREVIOUS_VERSION -Channel $env:BUILD_CHANNEL -OutputDirectory "$env:RUNNER_TEMP/tcn-baseline-build" -ReleaseConfigPath "$env:RUNNER_TEMP/tcn-release.json" -RequireReleaseLineage:($env:UNSIGNED_TEST -ne 'true')
+          $arguments = @{ Version = $env:PREVIOUS_VERSION; Channel = $env:BUILD_CHANNEL; PackageDirectory = "$env:RUNNER_TEMP/tcn-baseline-build/win-unpacked"; VpkPath = "$env:RUNNER_TEMP/velopack/vpk.exe"; OutputDirectory = "$env:RUNNER_TEMP/tcn-baseline" }
+          if ($env:UNSIGNED_TEST -eq 'true') { $arguments.UnsignedTest = $true } else { $arguments.SignerThumbprint = $env:SIGNER_THUMBPRINT }
+          ./tcn/scripts/releases/pack-windows.ps1 @arguments
+          New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/tcn-previous" | Out-Null
+          Copy-Item "$env:RUNNER_TEMP/tcn-baseline/releases/*-Setup.exe" "$env:RUNNER_TEMP/tcn-previous"
+      - name: Real installation, installed upgrade and staging acceptance
+        run: |
+          $previous = @(Get-ChildItem "$env:RUNNER_TEMP/tcn-previous" -Filter '*-Setup.exe')
+          if ($previous.Count -ne 1) { throw 'Expected one preceding installer.' }
+          ./tcn/scripts/releases/test-installed-upgrade.ps1 -PreviousInstallerPath $previous[0].FullName -PreviousVersion $env:PREVIOUS_VERSION -CandidateDirectory "$env:RUNNER_TEMP/tcn-candidate" -OutputDirectory "$env:RUNNER_TEMP/tcn-acceptance"
+      - name: Freeze corresponding source and deliverables
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/tcn-deliverable/releases" -Force | Out-Null
+          $candidate = Get-Content "$env:RUNNER_TEMP/tcn-candidate/candidate.json" -Raw | ConvertFrom-Json
+          foreach ($artifact in $candidate.artifacts) { Copy-Item -LiteralPath "$env:RUNNER_TEMP/tcn-candidate/releases/$($artifact.name)" -Destination "$env:RUNNER_TEMP/tcn-deliverable/releases" }
+          Copy-Item "$env:RUNNER_TEMP/tcn-candidate/releases/SHA256SUMS" "$env:RUNNER_TEMP/tcn-deliverable/releases"
+          Copy-Item "$env:RUNNER_TEMP/tcn-candidate/candidate.json" "$env:RUNNER_TEMP/tcn-deliverable"
+          Copy-Item "$env:RUNNER_TEMP/tcn-candidate/payload-inspection.json" "$env:RUNNER_TEMP/tcn-deliverable"
+          Copy-Item "$env:RUNNER_TEMP/tcn-acceptance/acceptance.json" "$env:RUNNER_TEMP/tcn-deliverable"
+          Copy-Item "$env:RUNNER_TEMP/tcn-update-engine/receipt.json" "$env:RUNNER_TEMP/tcn-deliverable/update-engine.json"
+          Copy-Item -LiteralPath "$env:RUNNER_TEMP/tcn-build/tcn-chat-client-$env:VERSION-source.zip" -Destination "$env:RUNNER_TEMP/tcn-deliverable"
+          Copy-Item -LiteralPath "$env:RUNNER_TEMP/tcn-build/source.json" -Destination "$env:RUNNER_TEMP/tcn-deliverable"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: tcn-acceptance-evidence-${{ matrix.channel }}-${{ inputs.version }}
+          path: |
+            ${{ runner.temp }}/tcn-acceptance/**/*.json
+            ${{ runner.temp }}/tcn-acceptance/**/*.log
+            ${{ runner.temp }}/tcn-acceptance/**/*.png
+            ${{ runner.temp }}/tcn-update-engine/receipt.json
+            ${{ runner.temp }}/tcn-update-engine/failure.json
+          if-no-files-found: ignore
+          retention-days: 30
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tcn-desktop-${{ matrix.channel }}-${{ inputs.version }}
+          path: ${{ runner.temp }}/tcn-deliverable/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    if: ${{ inputs.publish && !inputs.unsigned_test }}
+    needs: [plan, candidate]
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: ${{ fromJSON(needs.plan.outputs.channels) }}
+    runs-on: windows-2025
+    environment: desktop-publish-${{ matrix.channel }}
+    concurrency:
+      group: tcn-desktop-publish-${{ matrix.channel }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SIGNER_THUMBPRINT: ${{ vars.TCN_SIGNER_THUMBPRINT }}
+      CHANNEL: ${{ matrix.channel }}
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: tcn-desktop-${{ matrix.channel }}-${{ inputs.version }}
+          path: ${{ runner.temp }}/tcn-candidate
+      - name: Require the configured publication review gate
+        run: |
+          $environment = gh api "repos/$env:GITHUB_REPOSITORY/environments/desktop-publish-$env:CHANNEL" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or @($environment.protection_rules | Where-Object type -EQ 'required_reviewers').Count -eq 0) { throw 'Publication requires a protected environment with required reviewers.' }
+      - name: Validate and publish exact accepted bytes
+        run: |
+          ./tcn/scripts/releases/publish-github.ps1 -Repository $env:GITHUB_REPOSITORY -SourceRevision $env:GITHUB_SHA -SourceArchive "$env:RUNNER_TEMP/tcn-candidate/tcn-chat-client-$env:VERSION-source.zip" -CandidateDirectory "$env:RUNNER_TEMP/tcn-candidate" -AcceptanceReceipt "$env:RUNNER_TEMP/tcn-candidate/acceptance.json" -SignerThumbprint $env:SIGNER_THUMBPRINT -Apply
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: tcn-publication-${{ matrix.channel }}-${{ inputs.version }}
+          path: ${{ runner.temp }}/tcn-candidate/publication*.json
+          if-no-files-found: ignore
+

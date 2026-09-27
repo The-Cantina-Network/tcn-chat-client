@@ -8,14 +8,14 @@ const path = require('node:path');
 const {promisify} = require('node:util');
 const execFileAsync = promisify(execFile);
 const isLinuxBuild = process.argv.includes('--linux');
-const productName = isCanary ? 'Fluxer Canary' : 'Fluxer';
-const linuxOptDirName = isCanary ? 'fluxer-canary' : 'Fluxer';
+const productName = isCanary ? 'TCN Chat Canary' : 'TCN Chat';
+const linuxOptDirName = isCanary ? 'tcn-chat-canary' : 'tcn-chat';
 const installedProductName = isLinuxBuild ? linuxOptDirName : productName;
-const artifactProductName = isCanary ? 'Fluxer-Canary' : 'Fluxer';
-const appId = isCanary ? 'app.fluxer.canary' : 'app.fluxer';
-const iconDir = isCanary ? 'icons-canary' : 'icons-stable';
-const packageName = isCanary ? 'fluxer_desktop_canary' : 'fluxer_desktop';
-const linuxPackageName = isCanary ? 'fluxer-canary' : 'fluxer';
+const artifactProductName = isCanary ? 'TCN-Chat-Canary' : 'TCN-Chat';
+const appId = isCanary ? 'net.the-cantina.chat.canary' : 'net.the-cantina.chat';
+const iconDir = 'icons-tcn';
+const packageName = isCanary ? 'tcn_chat_desktop_canary' : 'tcn_chat_desktop';
+const linuxPackageName = isCanary ? 'tcn-chat-canary' : 'tcn-chat';
 const linuxDesktopActionIds = ['open-settings', 'new-dm'];
 const linuxDesktopActionList = `${linuxDesktopActionIds.join(';')};`;
 const linuxGlibcBaseline = Object.freeze({major: 2, minor: 35, patch: 0, name: 'GLIBC_2.35'});
@@ -68,6 +68,8 @@ if (isLinuxBuild && /\s/.test(linuxOptDirName)) {
 		`Linux install directory /opt/${linuxOptDirName} contains whitespace. Chromium splits the SUID sandbox path on spaces, so the zygote fails to start on hosts without unprivileged user namespaces.`,
 	);
 }
+
+if (targetPlatform !== 'win32') throw new Error('TCN packaging currently supports Windows only; other installers need a separate review.');
 
 const targetArchs = electronArch && electronArch !== 'universal' ? [electronArch] : supportedTargetArchs;
 const macTargetArchs = targetNativeArch ? [targetNativeArch] : supportedTargetArchs;
@@ -312,6 +314,8 @@ const packagedRuntimeArtifactExcludes = [
 	'!node_modules/emscripten-wasm-loader/dist/types/**/*',
 ];
 const bundledDependencyExcludes = [
+	// The voice bridge is bundled by esbuild; its source fixtures are not runtime payload.
+	'!node_modules/@fluxer/voice_engine_v2/**/*',
 	'!node_modules/@homebridge/dbus-native/**/*',
 	'!node_modules/@simplewebauthn/browser/**/*',
 	'!node_modules/duplexer/**/*',
@@ -1484,6 +1488,8 @@ module.exports = {
 	files: [
 		'dist/**/*',
 		'package.json',
+		'LICENSE',
+		'TCN-UPSTREAM.md',
 		...nativeRuntimeFilePatterns,
 		'node_modules/hunspell-asm/**/*',
 		...nativeBuildArtifactExcludes,
@@ -1588,7 +1594,7 @@ module.exports = {
 		{
 			name: appId,
 			role: 'Viewer',
-			schemes: ['fluxer'],
+			schemes: ['tcnchat'],
 		},
 	],
 	beforePack: verifyNativePackageInputs,

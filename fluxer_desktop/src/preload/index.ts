@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import {installLoginSelector} from '@electron/tcn/LoginSelector';
+
 import {BUILD_CHANNEL} from '@electron/common/BuildChannel';
 import type {
 	AppMetricsSnapshot,
@@ -826,3 +828,5 @@ ipcRenderer.on('spellcheck-engine-resolved', (_event, info: SpellcheckResolvedEn
 });
 
 contextBridge.exposeInMainWorld('electron', api);
+
+void installLoginSelector().catch(() => { /* Optional desktop chrome must not interrupt native preload. */ });

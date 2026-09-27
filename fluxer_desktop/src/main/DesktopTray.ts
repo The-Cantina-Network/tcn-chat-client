@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import {BUILD_CHANNEL} from '@electron/common/BuildChannel';
 import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {BUILD_CHANNEL} from '@electron/common/BuildChannel';
+import {DESKTOP_APP_NAME} from '@electron/common/DesktopIdentity';
 import {getDesktopWindowBehaviorSettings} from '@electron/common/DesktopConfig';
 import {createChildLogger} from '@electron/common/Logger';
 import type {
@@ -17,10 +18,9 @@ import {app, type BrowserWindow, clipboard, Menu, nativeImage, Tray} from 'elect
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const logger = createChildLogger('DesktopTray');
-const isCanary = BUILD_CHANNEL === 'canary';
-const APP_NAME = isCanary ? 'Fluxer Canary' : 'Fluxer';
-const ICON_DIR_NAME = isCanary ? 'icons-canary' : 'icons-stable';
-const TRAY_POSITION_GUID = isCanary ? '1a39981b-b4cc-46a4-8f7e-9fce187110f5' : '11c70c9f-a35d-4328-9040-f722dc5fa0a0';
+const APP_NAME = DESKTOP_APP_NAME;
+const ICON_DIR_NAME = 'icons-tcn';
+const TRAY_POSITION_GUID = BUILD_CHANNEL === 'canary' ? 'c3f6f1a3-35f3-467a-9a9b-2b90aa3f878f' : '11829fea-c472-496f-b008-856d7f14275f';
 
 interface DesktopTrayController {
 	createWindow: () => BrowserWindow;

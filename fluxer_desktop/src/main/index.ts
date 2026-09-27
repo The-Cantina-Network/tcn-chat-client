@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import {initializeServerSelection, registerServerSelection} from '@electron/tcn/ServerState';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -7,7 +8,6 @@ import {
 	getDesktopTroubleshootingSettings,
 	getDesktopWindowBehaviorSettings,
 	loadDesktopConfig,
-	setRuntimeAppUrlOverride,
 } from '@electron/common/DesktopConfig';
 import {
 	DESKTOP_APP_NAME,
@@ -74,8 +74,6 @@ import {
 	setQuitting,
 	showWindow,
 } from '@electron/main/Window';
-import {removeLegacySquirrelUninstallEntry} from '@electron/main/WindowsLegacyUninstallEntry';
-import {removeFluxerVulkanLayerRegistrations} from '@electron/main/WindowsVulkanLayerCleanup';
 import {app, dialog, netLog} from 'electron';
 import log from 'electron-log';
 
@@ -143,8 +141,7 @@ try {
 	launchDiagnosticOptions = describeLaunchDiagnosticOptions(process.argv);
 	const appUrlOverride = getLaunchAppUrlOverride(process.argv);
 	if (appUrlOverride) {
-		setRuntimeAppUrlOverride(appUrlOverride);
-		log.info('Using one-shot app URL override from command line', {appUrl: appUrlOverride});
+		throw new Error('Use the TCN server selector instead of --fluxer-app-url.');
 	}
 } catch (error) {
 	launchConfigurationError = error instanceof Error ? error : new Error(String(error));
@@ -299,6 +296,7 @@ if (launchConfigurationError) {
 			}
 		});
 		runStartupPhaseAsync('gpu-driver-workarounds', appendWindowsGpuDriverWorkaroundSwitches)
+			.then(() => initializeServerSelection(userDataConfig.base))
 			.then(() => app.whenReady())
 			.then(async () => {
 				log.info('App ready, initializing...');
@@ -327,6 +325,7 @@ if (launchConfigurationError) {
 				}
 				try {
 					runStartupPhase('ipc-handlers', registerIpcHandlers);
+					registerServerSelection();
 				} catch (error) {
 					log.error('[Init] Failed to register IPC handlers:', error);
 				}
@@ -354,16 +353,6 @@ if (launchConfigurationError) {
 					runStartupPhase('native-audio-handlers', registerNativeAudioHandlers);
 				} catch (error: unknown) {
 					log.error('[Init] Failed to register native audio handlers:', error);
-				}
-				try {
-					runStartupPhase('vulkan-layer-cleanup', removeFluxerVulkanLayerRegistrations);
-				} catch (error: unknown) {
-					log.error('[Init] Failed to remove stale Vulkan layer registrations:', error);
-				}
-				try {
-					runStartupPhase('legacy-uninstall-entry-cleanup', removeLegacySquirrelUninstallEntry);
-				} catch (error: unknown) {
-					log.error('[Init] Failed to remove the legacy Squirrel uninstall entry:', error);
 				}
 				try {
 					runStartupPhase('native-screen-capture-handlers', registerNativeScreenCaptureHandlers);

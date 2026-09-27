@@ -1,0 +1,18 @@
+{
+  "schema": "tcn-desktop-lineage/v1",
+  "upstream": {
+    "repository": "fluxerapp/fluxer",
+    "commit": "c9754ac11a75295c367c100a1a3f3787b723d809",
+    "releaseTag": null
+  },
+  "patchIds": [
+    "D01",
+    "D02",
+    "D03",
+    "D04",
+    "D05",
+    "D06"
+  ],
+  "status": "evaluation-only-unmapped-desktop-release",
+  "note": "This exact upstream pin is retained for local evaluation. An API tag is not a desktop release. Set a desktop tag only after official release/ref verification and reviewed adoption; public release checks reject this null tag."
+}

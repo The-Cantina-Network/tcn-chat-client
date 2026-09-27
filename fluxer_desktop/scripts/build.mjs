@@ -5,6 +5,8 @@ import * as fs from 'node:fs';
 import {createRequire} from 'node:module';
 import * as path from 'node:path';
 import * as esbuild from 'esbuild';
+import {validateReleaseConfig} from '../src/tcn/UpdatePolicy.mjs';
+import {validateReceipt} from '../../tcn/scripts/releases/lineage.mjs';
 
 const ROOT_DIR = path.resolve(import.meta.dirname, '..');
 const SRC_DIR = path.join(ROOT_DIR, 'src');
@@ -18,7 +20,16 @@ const isProduction =
 const skipNative = process.env.FLUXER_SKIP_NATIVE === 'true';
 const embeddedBuildVersion = process.env.PUBLIC_BUILD_VERSION || process.env.BUILD_VERSION || '';
 const embeddedReleaseChannel = process.env.PUBLIC_RELEASE_CHANNEL || process.env.RELEASE_CHANNEL || '';
+const releaseConfigPath = process.env.TCN_RELEASE_CONFIG_PATH;
+const releaseConfig = releaseConfigPath
+    ? validateReleaseConfig(JSON.parse(fs.readFileSync(releaseConfigPath, 'utf8')), process.env.BUILD_CHANNEL || 'stable')
+    : null;
+const sourceReceipt = process.env.TCN_SOURCE_RECEIPT_PATH
+    ? validateReceipt(JSON.parse(fs.readFileSync(process.env.TCN_SOURCE_RECEIPT_PATH, 'utf8')), {
+        version: embeddedBuildVersion, channel: process.env.BUILD_CHANNEL || 'stable',
+    }) : null;
 const publicBuildDefines = {
+    __TCN_RELEASE_CONFIG__: JSON.stringify(releaseConfig),
 	'process.env.PUBLIC_BUILD_VERSION': JSON.stringify(embeddedBuildVersion),
 	'process.env.BUILD_VERSION': JSON.stringify(embeddedBuildVersion),
 	'process.env.PUBLIC_RELEASE_CHANNEL': JSON.stringify(embeddedReleaseChannel),
@@ -603,6 +614,7 @@ async function buildPreload() {
 	console.log('Building preload script...');
 	await esbuild.build({
 		entryPoints: [path.join(SRC_DIR, 'preload', 'index.ts')],
+		loader: {'.css': 'text', '.svg': 'text'},
 		bundle: true,
 		platform: 'node',
 		target: 'node20',
@@ -648,6 +660,8 @@ async function build() {
 	fs.mkdirSync(path.join(DIST_DIR, 'preload'), {recursive: true});
 	buildNativeAddons();
 	await Promise.all([buildMain(), buildPreload()]);
+    fs.writeFileSync(path.join(DIST_DIR, 'release.json'), JSON.stringify(releaseConfig, null, 2));
+    fs.writeFileSync(path.join(DIST_DIR, 'source.json'), JSON.stringify(sourceReceipt, null, 2));
 	console.log('Build complete!');
 }
 

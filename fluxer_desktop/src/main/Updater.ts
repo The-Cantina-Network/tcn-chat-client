@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import {TCN_COMMUNITY_BUILD} from '@electron/tcn/Build';
+
 import {createRequire} from 'node:module';
+import fs from 'node:fs';
+import path from 'node:path';
+import {BUILD_CHANNEL} from '@electron/common/BuildChannel';
+import {WINDOWS_VELOPACK_ID} from '@electron/common/DesktopIdentity';
+import {requirePrivilegedRendererDocumentSender} from '@electron/main/PrivilegedRendererDocuments';
+import {TCN_RELEASE_CONFIG} from '@electron/tcn/Release';
+import {validatePendingUpdate, writeVerifiedUpdate, quarantinePendingUpdate} from '@electron/tcn/UpdateCache';
+import {compareReleaseVersions, validateReleaseAsset} from '@electron/tcn/UpdatePolicy.mjs';
 import {isPortableMode} from '@electron/common/UserDataPath';
 import {
 	AppImageChecksumError,
@@ -36,7 +46,7 @@ import {
 	type UpdaterDownloadOption,
 } from '@electron/main/UpdaterDownloads';
 import {setQuitting} from '@electron/main/Window';
-import {app, autoUpdater, type BrowserWindow, ipcMain} from 'electron';
+import {app, autoUpdater, type BrowserWindow, type IpcMainInvokeEvent, ipcMain} from 'electron';
 import log from 'electron-log';
 import type {UpdateInfo, VelopackAsset} from 'velopack';
 
@@ -94,6 +104,7 @@ let pendingVelopackUpdate: VelopackUpdate | null = null;
 let velopackCheckPromise: Promise<void> | null = null;
 let velopackDownloadPromise: Promise<void> | null = null;
 let velopackInstallStarted = false;
+let lastTcnBackgroundCheck = 0;
 let pendingAppImageUpdate: PendingAppImageUpdate | null = null;
 let appImageUpdatePromise: Promise<void> | null = null;
 let appImageInstallStarted = false;
@@ -152,7 +163,58 @@ function getVelopackUpdateSize(update: VelopackUpdate): number | null {
 
 function createVelopackUpdateManager() {
 	const {UpdateManager} = requireModule('velopack') as typeof import('velopack');
-	return new UpdateManager(UPDATE_BASE_URL);
+	return new UpdateManager(UPDATE_BASE_URL, {AllowVersionDowngrade: false, ExplicitChannel: 'win', MaximumDeltasBeforeFallback: 0});
+}
+
+function isInstalledTcnRelease(): boolean {
+    if (process.platform !== 'win32' || !app.isPackaged || isPortableMode() || !TCN_RELEASE_CONFIG) return false;
+    const current = path.dirname(process.execPath);
+    if (path.basename(current).toLowerCase() !== 'current' ||
+        !fs.existsSync(path.join(path.dirname(current), 'Update.exe')) ||
+        !fs.existsSync(path.join(current, 'sq.version'))) return false;
+    try {
+        const manager = createVelopackUpdateManager();
+        return manager.getAppId() === WINDOWS_VELOPACK_ID && !manager.isPortable() &&
+            compareReleaseVersions(manager.getCurrentVersion(), app.getVersion()) === 0;
+    } catch (error) {
+        log.warn('TCN updates unavailable for this installation', error);
+        return false;
+    }
+}
+
+function validateTcnUpdate(update: VelopackUpdate, manager: VelopackUpdateManager, source: 'feed' | 'downloaded' = 'feed'): void {
+    if (!TCN_COMMUNITY_BUILD) return;
+    validateReleaseAsset(update, WINDOWS_VELOPACK_ID, manager.getCurrentVersion(), BUILD_CHANNEL, source);
+    if (source === 'downloaded') validatePendingUpdate(tcnPackagesRoot(), update, tcnCachePolicy(manager));
+}
+
+function tcnPackagesRoot(): string {
+    return path.join(path.dirname(path.dirname(process.execPath)), 'packages');
+}
+function tcnCachePolicy(manager: VelopackUpdateManager) {
+    return {packageId: WINDOWS_VELOPACK_ID, channel: BUILD_CHANNEL, currentVersion: manager.getCurrentVersion()};
+}
+function getVerifiedPendingUpdate(manager: VelopackUpdateManager): VelopackAsset | null {
+    const pending = manager.getUpdatePendingRestart();
+    if (!pending || !TCN_COMMUNITY_BUILD) return pending;
+    try {
+        validateTcnUpdate(pending, manager, 'downloaded');
+        return pending;
+    } catch (error) {
+        log.warn('Quarantining an unverified pending TCN update', error);
+        quarantinePendingUpdate(tcnPackagesRoot(), pending, WINDOWS_VELOPACK_ID);
+        pendingVelopackUpdate = null;
+        return null;
+    }
+}
+
+function requireUpdaterSender(event: IpcMainInvokeEvent, getMainWindow: () => BrowserWindow | null, context?: unknown): void {
+    if (!TCN_COMMUNITY_BUILD) return;
+    requirePrivilegedRendererDocumentSender(event, 'desktop-updater');
+    if (event.sender !== getMainWindow()?.webContents) throw new Error('Updates require the main window.');
+    if (context !== undefined && context !== 'user' && context !== 'background' && context !== 'focus') {
+        throw new Error('Invalid updater context.');
+    }
 }
 
 type VelopackUpdateManager = ReturnType<typeof createVelopackUpdateManager>;
@@ -190,8 +252,13 @@ async function sendVelopackApplyFailure(
 		type: 'error',
 		context,
 		phase: 'install',
-		message: `Fluxer could not finish installing version ${attempt.version}.`,
+		message: `${TCN_COMMUNITY_BUILD ? 'TCN Chat' : 'Fluxer'} could not finish installing version ${attempt.version}.`,
 	});
+    if (TCN_COMMUNITY_BUILD) {
+        send(getMainWindow(), {type: 'available', context, version: attempt.version,
+            downloadSize: null, downloadStarted: false, downloadUrl: DOWNLOAD_PAGE_URL});
+        return;
+    }
 	try {
 		const latest = await fetchManualLatest({forceRefresh: true});
 		sendManualUpdateAvailable(getMainWindow, context, latest);
@@ -216,6 +283,17 @@ async function checkVelopackForUpdates(
 	if (velopackCheckPromise) {
 		return velopackCheckPromise;
 	}
+    if (TCN_COMMUNITY_BUILD && context !== 'user') {
+        if (Date.now() - lastTcnBackgroundCheck < 5 * 60 * 1000) {
+            const manager = createVelopackUpdateManager();
+            const pending = getVerifiedPendingUpdate(manager);
+            if (pending) {
+                send(getMainWindow(), {type: 'downloaded', context, version: getVelopackUpdateVersion(pending)});
+            }
+            return;
+        }
+        lastTcnBackgroundCheck = Date.now();
+    }
 	velopackCheckPromise = (async () => {
 		try {
 			send(getMainWindow(), {type: 'checking', context});
@@ -225,7 +303,7 @@ async function checkVelopackForUpdates(
 				await sendVelopackApplyFailure(context, getMainWindow, failedApply);
 				return;
 			}
-			const pendingUpdate = updateManager.getUpdatePendingRestart();
+			const pendingUpdate = getVerifiedPendingUpdate(updateManager);
 			const update = await updateManager.checkForUpdatesAsync();
 			if (!update) {
 				if (pendingUpdate) {
@@ -241,6 +319,7 @@ async function checkVelopackForUpdates(
 				send(getMainWindow(), {type: 'not-available', context});
 				return;
 			}
+            validateTcnUpdate(update, updateManager);
 			if (pendingUpdate) {
 				const pendingVersion = getVelopackUpdateVersion(pendingUpdate);
 				const updateVersion = getVelopackUpdateVersion(update);
@@ -264,8 +343,9 @@ async function checkVelopackForUpdates(
 				context,
 				version: getVelopackUpdateVersion(update),
 				downloadSize: getVelopackUpdateSize(update),
-				downloadStarted: false,
+				downloadStarted: TCN_COMMUNITY_BUILD,
 			});
+            if (TCN_COMMUNITY_BUILD) await downloadVelopackUpdate(context, getMainWindow);
 		} catch (error) {
 			send(getMainWindow(), {type: 'error', context, phase: 'check', message: getErrorMessage(error)});
 		}
@@ -305,7 +385,15 @@ async function downloadVelopackUpdate(
 			let smoothedBytesPerSecond = 0;
 			try {
 				const updateManager = createVelopackUpdateManager();
-				await updateManager.downloadUpdateAsync(update, (percent) => {
+                validateTcnUpdate(update, updateManager);
+                if (TCN_COMMUNITY_BUILD) {
+                    // SDK 1.2 reuses final cache files and extracts its updater before
+                    // returning. Remove that reuse path before trusting SDK download.
+                    quarantinePendingUpdate(tcnPackagesRoot(), getVelopackAsset(update), WINDOWS_VELOPACK_ID);
+                }
+                // The initial TCN pipeline distributes complete packages.
+                const download = TCN_COMMUNITY_BUILD ? {...update, DeltasToTarget: []} : update;
+				await updateManager.downloadUpdateAsync(download, (percent) => {
 					const transferred = total > 0 ? Math.round((total * percent) / 100) : 0;
 					const now = Date.now();
 					const dtMs = now - lastSampleAt;
@@ -327,6 +415,14 @@ async function downloadVelopackUpdate(
 						});
 					}
 				});
+                if (TCN_COMMUNITY_BUILD) {
+                    try {
+                        writeVerifiedUpdate(tcnPackagesRoot(), update, tcnCachePolicy(updateManager));
+                    } catch (error) {
+                        quarantinePendingUpdate(tcnPackagesRoot(), getVelopackAsset(update), WINDOWS_VELOPACK_ID);
+                        throw error;
+                    }
+                }
 				send(getMainWindow(), {
 					type: 'downloaded',
 					context,
@@ -361,10 +457,13 @@ function installVelopackUpdate(): void {
 		return;
 	}
 	const updateManager = createVelopackUpdateManager();
-	const update = pendingVelopackUpdate ?? updateManager.getUpdatePendingRestart();
+    const downloaded = getVerifiedPendingUpdate(updateManager);
+	const update = TCN_COMMUNITY_BUILD ? downloaded : pendingVelopackUpdate ?? downloaded;
 	if (!update) {
 		throw new Error('No Velopack update is ready to install.');
 	}
+    // Velopack checks feed digests during download; its local pending asset omits them.
+    validateTcnUpdate(update, updateManager, 'downloaded');
 	if (resolveFailedVelopackApply(updateManager)) {
 		throw new Error('The last update could not be installed. Download the installer to update.');
 	}
@@ -372,23 +471,46 @@ function installVelopackUpdate(): void {
 	if (updateVersion) {
 		recordVelopackApplyAttempt(updateVersion);
 	}
+    try {
+        updateManager.waitExitThenApplyUpdate(update);
+    } catch (error) {
+        clearVelopackApplyAttempt();
+        throw error;
+    }
 	velopackInstallStarted = true;
 	setQuitting(true);
 	destroyDesktopTray();
-	updateManager.waitExitThenApplyUpdate(update);
 	setImmediate(() => app.exit(0));
 }
 
 function registerVelopackUpdater(getMainWindow: () => BrowserWindow | null): void {
-	ipcMain.handle('updater-check', async (_e, context: UpdaterContext) => {
+    if (TCN_COMMUNITY_BUILD) {
+        // Hosted pages also request checks; the shared promise/throttle coalesces them.
+        // Native scheduling keeps recovery available when the hosted renderer cannot start.
+        const check = () => void checkVelopackForUpdates('background', getMainWindow).catch(error => {
+            log.warn('Automatic TCN update check failed', error);
+        });
+        const startup = setTimeout(check, 10_000);
+        const interval = setInterval(check, 30 * 60 * 1000);
+        startup.unref();
+        interval.unref();
+        app.on('will-quit', () => {
+            clearTimeout(startup);
+            clearInterval(interval);
+        });
+    }
+	ipcMain.handle('updater-check', async (event, context: UpdaterContext) => {
+        requireUpdaterSender(event, getMainWindow, context);
 		lastContext = context;
 		await checkVelopackForUpdates(context, getMainWindow);
 	});
-	ipcMain.handle('updater-download', async (_e, context: UpdaterContext) => {
+	ipcMain.handle('updater-download', async (event, context: UpdaterContext) => {
+        requireUpdaterSender(event, getMainWindow, context);
 		lastContext = context;
 		await downloadVelopackUpdate(context, getMainWindow);
 	});
-	ipcMain.handle('updater-install', async () => {
+	ipcMain.handle('updater-install', async (event) => {
+        requireUpdaterSender(event, getMainWindow);
 		installVelopackUpdate();
 	});
 }
@@ -491,30 +613,8 @@ let manualLatestCache: {at: number; info: ManualLatestInfo} | null = null;
 
 const MANUAL_CACHE_TTL_MS = 5 * 60 * 1000;
 
-function parseSemverTuple(input: string): [number, number, number, string] {
-	const trimmed = input.trim().replace(/^v/, '');
-	const [core, ...preParts] = trimmed.split('-');
-	const pre = preParts.join('-');
-	const segments = core.split('.').map((part) => Number.parseInt(part, 10));
-	const [major = 0, minor = 0, patch = 0] = segments;
-	return [
-		Number.isFinite(major) ? major : 0,
-		Number.isFinite(minor) ? minor : 0,
-		Number.isFinite(patch) ? patch : 0,
-		pre,
-	];
-}
-
 function compareVersions(a: string, b: string): number {
-	const [aMaj, aMin, aPat, aPre] = parseSemverTuple(a);
-	const [bMaj, bMin, bPat, bPre] = parseSemverTuple(b);
-	if (aMaj !== bMaj) return aMaj < bMaj ? -1 : 1;
-	if (aMin !== bMin) return aMin < bMin ? -1 : 1;
-	if (aPat !== bPat) return aPat < bPat ? -1 : 1;
-	if (aPre === bPre) return 0;
-	if (!aPre) return 1;
-	if (!bPre) return -1;
-	return aPre < bPre ? -1 : 1;
+    return compareReleaseVersions(a.replace(/^v/, ''), b.replace(/^v/, ''));
 }
 
 function parseManualLatestFiles(value: unknown): Partial<Record<ManualDesktopFormat, ManualLatestFile>> {
@@ -804,6 +904,14 @@ function registerManualUpdater(
 }
 
 export function registerUpdater(getMainWindow: () => BrowserWindow | null) {
+	if (TCN_COMMUNITY_BUILD) {
+        if (isInstalledTcnRelease()) {
+            registerVelopackUpdater(getMainWindow);
+            return;
+        }
+		registerManualUpdater(getMainWindow, 'managed-package');
+		return;
+	}
 	if (!app.isPackaged) {
 		registerManualUpdater(getMainWindow, 'unpackaged');
 		return;

@@ -1,6 +1,6 @@
 {
 	"name": "fluxer_desktop",
-	"version": "0.0.0",
+	"version": "0.1.0-dev.11",
 	"description": "Instant messaging and VoIP application",
 	"homepage": "https://fluxer.app",
 	"author": "Fluxer Platform AB <support@fluxer.app>",
@@ -13,7 +13,8 @@
 		"set-channel": "../tools/ci/run.sh build-desktop --step set_build_channel",
 		"test": "pnpm test:main && cargo test --manifest-path native/rust/Cargo.toml",
 		"test:main": "node --test 'src/main/*.test.mjs'",
-		"typecheck": "pnpm set-channel && tsc --noEmit"
+		"typecheck": "pnpm set-channel && tsc --noEmit",
+		"test:tcn": "node --test src/tcn/*.test.mjs"
 	},
 	"dependencies": {
 		"@fluxer/voice_engine_v2": "workspace:*",

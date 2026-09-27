@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import {BUILD_CHANNEL} from '@electron/common/BuildChannel';
+import {TCN_COMMUNITY_BUILD} from '@electron/tcn/Build';
+import {TCN_RELEASE_CONFIG} from '@electron/tcn/Release';
 
 export type UpdaterDownloadOption = {
 	format: ManualDesktopFormat;
@@ -18,9 +20,10 @@ function getDesktopDownloadArch(arch: NodeJS.Architecture): DesktopDownloadArch 
 
 const DESKTOP_DOWNLOAD_ARCH = getDesktopDownloadArch(process.arch);
 const PKGS_BASE_URL = 'https://pkgs.fluxer.com';
-export const UPDATE_BASE_URL = `${PKGS_BASE_URL}/desktop/${BUILD_CHANNEL}/${process.platform}/${DESKTOP_DOWNLOAD_ARCH}`;
+export const UPDATE_BASE_URL = TCN_COMMUNITY_BUILD ? TCN_RELEASE_CONFIG?.feedUrl ?? '' : `${PKGS_BASE_URL}/desktop/${BUILD_CHANNEL}/${process.platform}/${DESKTOP_DOWNLOAD_ARCH}`;
 export const DOWNLOAD_PAGE_URL =
-	BUILD_CHANNEL === 'canary' ? 'https://canary.fluxer.app/download' : 'https://fluxer.app/download';
+	TCN_COMMUNITY_BUILD ? TCN_RELEASE_CONFIG?.downloadPageUrl ?? ''
+    : BUILD_CHANNEL === 'canary' ? 'https://canary.fluxer.app/download' : 'https://fluxer.app/download';
 
 export const MANUAL_DESKTOP_FORMATS = ['setup', 'dmg', 'zip', 'appimage', 'deb', 'rpm', 'tar_gz'] as const;
 

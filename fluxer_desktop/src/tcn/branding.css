@@ -1,0 +1,36 @@
+/* TCN highlights only. Base themes retain their backgrounds, text and neutral surfaces. */
+:root:not(.theme-light) {
+  --brand-primary: #175251 !important;
+  --brand-secondary: #1c6563 !important;
+  --brand-primary-light: #59c8c4 !important;
+  --brand-primary-fill: #d9fffc !important;
+  --text-on-brand-primary: #d9fffc !important;
+  --text-link: #59c8c4 !important;
+  --focus-primary: #59c8c4 !important;
+  --border-color-focus: #59c8c4 !important;
+  --background-modifier-selected: #2a2316 !important;
+  --background-modifier-accent-focus: #59c8c4 !important;
+  --surface-interactive-selected-bg: #2a2316 !important;
+  --surface-interactive-selected-color: #d5aa58 !important;
+  --control-button-active-bg: #2a2316 !important;
+  --control-button-active-text: #d5aa58 !important;
+  --text-selection: rgb(89 200 196 / 30%) !important;
+}
+
+/* The TCN wordmark remains branded independently of the optional custom palette. */
+:root:not(.theme-light) [data-flx="auth.flow.auth-card-container.fluxer-wordmark"] {
+  color: #e6c17b !important;
+}
+
+/* Preserve the hosted TCN artwork's native proportions. */
+[data-flx="auth.flow.auth-card-container.fluxer-logo"] {
+  width: 128px !important;
+  height: auto !important;
+  max-width: 100% !important;
+  object-fit: contain !important;
+}
+
+/* Approved local artwork replaces only TCN login/error marks, never community avatars. */
+[data-tcn-brand-source] { display: none !important; }
+/* Upstream's social status account does not describe the selected TCN service. */
+[data-flx="app.bootstrap-error-screen.error-fallback-description--3"] { display: none !important; }

@@ -1,0 +1,62 @@
+/**
+ * @name TCN
+ * @description Optional blue-charcoal, teal and gold palette for the Dark base theme. Other base themes remain unchanged.
+ * @author The Cantina Network
+ * @version 1.0.0
+ * @tags dark, tcn
+ */
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+
+:root.theme-dark {
+  --brand-primary: #175251 !important;
+  --brand-secondary: #1c6563 !important;
+  --brand-primary-light: #59c8c4 !important;
+  --brand-primary-fill: #d9fffc !important;
+  --text-on-brand-primary: #d9fffc !important;
+  --background-primary: #0b151c !important;
+  --background-secondary: #111d25 !important;
+  --background-secondary-alt: #0e1921 !important;
+  --background-secondary-lighter: #111d25 !important;
+  --background-tertiary: #0d171f !important;
+  --background-header-primary: #111d25 !important;
+  --background-header-primary-hover: #17262f !important;
+  --background-header-secondary: #0e1921 !important;
+  --background-channel-header: #111d25 !important;
+  --background-textarea: #0d171f !important;
+  --form-surface-background: #0d171f !important;
+  --text-primary: #edf3f4 !important;
+  --text-chat: #edf3f4 !important;
+  --text-secondary: #c8d2d6 !important;
+  --text-primary-muted: #a3b0b6 !important;
+  --text-chat-muted: #a3b0b6 !important;
+  --text-tertiary: #a3b0b6 !important;
+  --text-tertiary-muted: #82949d !important;
+  --text-tertiary-secondary: #82949d !important;
+  --text-link: #59c8c4 !important;
+  --focus-primary: #59c8c4 !important;
+  --border-color: #1d2a32 !important;
+  --border-color-hover: #33454e !important;
+  --border-color-focus: #59c8c4 !important;
+  --background-modifier-hover: #17262f !important;
+  --background-modifier-selected: #2a2316 !important;
+  --background-modifier-accent: #33454e !important;
+  --background-modifier-accent-focus: #59c8c4 !important;
+  --surface-interactive-hover-bg: #17262f !important;
+  --surface-interactive-selected-bg: #2a2316 !important;
+  --surface-interactive-selected-color: #d5aa58 !important;
+  --control-button-normal-text: #a3b0b6 !important;
+  --control-button-hover-bg: #17262f !important;
+  --control-button-hover-text: #edf3f4 !important;
+  --control-button-active-bg: #2a2316 !important;
+  --control-button-active-text: #d5aa58 !important;
+  --text-selection: rgb(89 200 196 / 30%) !important;
+}
+
+/* Optional auth-card colours; retain the existing form layout. */
+:root.theme-dark [data-flx="auth.flow.auth-card-container.div--3"] {
+  background: #0e1921 !important;
+}
+:root.theme-dark [data-flx="auth.flow.auth-card-container.fluxer-wordmark"] {
+  color: #e6c17b !important;
+}
+

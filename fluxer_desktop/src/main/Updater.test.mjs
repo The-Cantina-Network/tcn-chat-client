@@ -10,6 +10,7 @@ import {join} from 'node:path';
 import {after, before, describe, test} from 'node:test';
 import {fileURLToPath} from 'node:url';
 import vm from 'node:vm';
+import * as updatePolicy from '../tcn/UpdatePolicy.mjs';
 
 const require = createRequire(import.meta.url);
 const esbuild = require('esbuild');
@@ -117,6 +118,13 @@ function loadUpdater({
 	arch = 'arm64',
 	velopack,
 	applyAttempt = null,
+	tcnBuild = false,
+    releaseConfig = null,
+    installed = false,
+    portable = false,
+    channel = 'canary',
+    trusted = true,
+    cache = {validatePendingUpdate() {}, writeVerifiedUpdate() {}, quarantinePendingUpdate() {}},
 }) {
 	const events = [];
 	const handlers = new Map();
@@ -125,6 +133,14 @@ function loadUpdater({
 	const applyState = {attempt: applyAttempt, recorded: [], cleared: 0};
 	const module = {exports: {}};
 	const stubs = {
+        '@electron/tcn/Build': {TCN_COMMUNITY_BUILD: tcnBuild},
+        '@electron/tcn/Release': {TCN_RELEASE_CONFIG: releaseConfig},
+        '@electron/tcn/UpdatePolicy.mjs': updatePolicy,
+        '@electron/tcn/UpdateCache': cache,
+        '@electron/common/DesktopIdentity': {WINDOWS_VELOPACK_ID: 'tcn_chat_desktop_canary'},
+        '@electron/main/PrivilegedRendererDocuments': {requirePrivilegedRendererDocumentSender(event) {
+            if (!trusted || event.senderFrame?.detached || event.senderFrame?.parent) throw new Error('Untrusted updater sender');
+        }},
 		'@electron/main/UpdaterApplyState': {
 			readVelopackApplyAttempt: () => applyState.attempt,
 			recordVelopackApplyAttempt: (recordedVersion) => {
@@ -136,8 +152,8 @@ function loadUpdater({
 				applyState.attempt = null;
 			},
 		},
-		'@electron/common/BuildChannel': {BUILD_CHANNEL: 'canary'},
-		'@electron/common/UserDataPath': {isPortableMode: () => false},
+		'@electron/common/BuildChannel': {BUILD_CHANNEL: channel},
+		'@electron/common/UserDataPath': {isPortableMode: () => portable},
 		'@electron/main/DesktopTray': {destroyDesktopTray() {}},
 		'@electron/main/LinuxSandbox': {isFlatpakRuntime: () => false},
 		'@electron/main/Troubleshooting': {
@@ -182,12 +198,15 @@ function loadUpdater({
 		},
 		setTimeout,
 		clearTimeout,
+        setInterval,
+        clearInterval,
 		setImmediate,
 		fetch: (input, init) => {
 			const url = String(input).replace(/https:\/\/pkgs\.fluxer\.com\/desktop\/canary\/[^/]+\/[^/]+/, baseUrl);
 			return fetch(url, init);
 		},
 		require: (specifier) => {
+            if (specifier === 'node:fs' && installed) return {...require('node:fs'), existsSync: () => true};
 			if (specifier === 'node:module' && velopack) {
 				return {
 					...require('node:module'),
@@ -228,13 +247,16 @@ function loadUpdater({
 	sandbox.__filename = updaterSource.path;
 	vm.runInContext(updaterSource.code, context, {filename: updaterSource.path});
 
-	module.exports.registerUpdater(() => ({webContents: {send: (_channel, event) => events.push(event)}}));
+    const window = {webContents: {send: (_channel, event) => events.push(event)}};
+    const ipcEvent = {sender: window.webContents, senderFrame: {parent: null, detached: false}};
+    module.exports.registerUpdater(() => window);
 	return {
 		applyState,
 		events,
 		state,
-		check: () => handlers.get('updater-check')({}, 'user'),
-		install: () => handlers.get('updater-install')({}),
+        check: (context = 'user', event = ipcEvent) => handlers.get('updater-check')(event, context),
+        download: (context = 'user', event = ipcEvent) => handlers.get('updater-download')(event, context),
+        install: (event = ipcEvent) => handlers.get('updater-install')(event),
 		quit: () => appEvents.get('will-quit')?.(),
 	};
 }
@@ -566,4 +588,139 @@ describe('Updater Windows apply failures', () => {
 		assert.deepEqual(updater.applied, []);
 		assert.deepEqual(updater.applyState.recorded, []);
 	});
+});
+
+
+test('TCN fork reports managed updates without contacting an official feed', async () => {
+    const updater = loadUpdater({platform: 'win32', tcnBuild: true});
+    await updater.check();
+    assert.deepEqual(types(updater.events), ['unsupported']);
+    assert.equal(updater.events[0].reason, 'managed-package');
+    assert.equal(updater.events[0].downloadUrl, undefined);
+    await assert.rejects(() => updater.install(), /not supported/);
+    assert.equal(updater.state.electronRelaunched, false);
+});
+
+const TCN_CONFIG = {feedUrl: 'https://downloads.example.org/desktop/canary', downloadPageUrl: 'https://downloads.example.org'};
+function tcnFixture(options = {}) {
+    const asset = {PackageId: 'tcn_chat_desktop_canary', Version: '0.1.0-dev.12', Type: 'Full',
+        FileName: 'tcn_chat_desktop_canary-0.1.0-dev.12-full.nupkg', SHA256: 'a'.repeat(64), Size: 100, ...options.asset};
+    const downloaded = [], applied = [], sources = [], verified = [], quarantined = [];
+    let pending = options.pending ?? null;
+    class UpdateManager {
+        constructor(url, opts) { sources.push({url, opts}); }
+        getAppId() { return options.packageId ?? 'tcn_chat_desktop_canary'; }
+        getCurrentVersion() { return '0.1.0-dev.9'; }
+        isPortable() { return false; }
+        getUpdatePendingRestart() { return pending; }
+        async checkForUpdatesAsync() { if (options.offline) throw new Error('offline'); return {TargetFullRelease: asset, DeltasToTarget: []}; }
+        async downloadUpdateAsync(update, progress) { assert.equal(Boolean(options.cachedTarget), false); downloaded.push(update); progress(100); pending = {...asset, SHA256: '', SHA1: ''}; }
+        waitExitThenApplyUpdate(update) { if (options.failApply) throw new Error('Update launcher unavailable'); applied.push(update); }
+    }
+    const updater = loadUpdater({platform: 'win32', arch: 'x64', tcnBuild: true,
+        version: '0.1.0-dev.9', execPath: join(tmpdir(), 'tcn-install', 'current', 'TCN Chat Canary.exe'),
+        installed: options.installed ?? true, releaseConfig: TCN_CONFIG, velopack: {UpdateManager},
+        portable: options.portable, trusted: options.trusted, applyAttempt: options.applyAttempt,
+        cache: {
+            validatePendingUpdate() { if (options.corruptPending) throw new Error('Cached checksum mismatch'); },
+            writeVerifiedUpdate(_root, update) { verified.push(update.TargetFullRelease.Version); },
+            quarantinePendingUpdate(_root, asset) { if (pending || options.cachedTarget) quarantined.push(asset.Version); pending = null; options.corruptPending = false; options.cachedTarget = false; },
+        }});
+
+    return {...updater, downloaded, applied, sources, verified, quarantined};
+}
+describe('TCN installed Windows updates', () => {
+    test('automatically downloads only from compiled TCN feed, installs on explicit restart', async () => {
+        const updater = tcnFixture();
+        await updater.check('background');
+        assert.equal(updater.downloaded.length, 1);
+        assert.equal(updater.events.find(e => e.type === 'available').downloadStarted, true);
+        assert.equal(updater.events.at(-1).type, 'downloaded');
+        assert.equal(updater.applied.length, 0);
+        assert.ok(updater.sources.every(source => source.url === TCN_CONFIG.feedUrl && source.opts.AllowVersionDowngrade === false));
+        await updater.install();
+        assert.equal(updater.applied[0].Version, '0.1.0-dev.12');
+        assert.deepEqual(updater.verified, ['0.1.0-dev.12']);
+    });
+    test('coalesces overlapping checks', async () => {
+        const updater = tcnFixture();
+        await Promise.all([updater.check(), updater.check('focus')]);
+        assert.equal(updater.downloaded.length, 1);
+    });
+    for (const options of [{installed:false}, {portable:true}, {packageId:'fluxer'}]) {
+        test('leaves non-installed/portable/foreign packages manual: ' + JSON.stringify(options), async () => {
+            const updater = tcnFixture(options);
+            await updater.check();
+            assert.equal(updater.events[0].type, 'unsupported');
+            assert.equal(updater.downloaded.length, 0);
+        });
+    }
+    for (const asset of [{PackageId:'fluxer'}, {Version:'0.1.0-dev.8'}, {SHA256:''}, {FileName:'../evil.nupkg'}]) {
+        test('rejects unsafe release before download: ' + JSON.stringify(asset), async () => {
+            const updater = tcnFixture({asset});
+            await updater.check();
+            assert.equal(updater.events.at(-1).type, 'error');
+            assert.equal(updater.downloaded.length, 0);
+            await assert.rejects(updater.install, /No Velopack update/);
+        });
+    }
+    test('rejects untrusted frames, other windows and malformed contexts', async () => {
+        const untrusted = tcnFixture({trusted:false});
+        await assert.rejects(untrusted.check, /Untrusted/);
+        await assert.rejects(untrusted.download, /Untrusted/);
+        await assert.rejects(untrusted.install, /Untrusted/);
+        const updater = tcnFixture();
+        await assert.rejects(() => updater.check('arbitrary'), /Invalid updater context/);
+        await assert.rejects(() => updater.check('user', {sender:{}}), /main window/);
+        assert.equal(updater.downloaded.length, 0);
+    });
+    test('failed installation offers TCN recovery without an upstream latest API', async () => {
+        const updater = tcnFixture({applyAttempt:{version:'0.1.0-dev.12',attemptedAt:0}});
+        await updater.check();
+        assert.equal(updater.events.at(-1).downloadUrl, TCN_CONFIG.downloadPageUrl);
+        assert.equal(updater.downloaded.length, 0);
+    });
+    test('unrecognized cached target is quarantined before SDK can reuse or extract it', async () => {
+        const updater = tcnFixture({cachedTarget:true});
+        await updater.check();
+        assert.equal(updater.downloaded.length, 1);
+        assert.deepEqual(updater.quarantined, ['0.1.0-dev.12']);
+        assert.equal(updater.events.at(-1).type, 'downloaded');
+    });
+    test('corrupted pending bytes are quarantined and downloaded again', async () => {
+        const options = {};
+        const updater = tcnFixture(options);
+        await updater.check();
+        options.corruptPending = true;
+        await assert.rejects(updater.install, /No Velopack update/);
+        assert.equal(updater.applied.length, 0);
+        assert.deepEqual(updater.quarantined, ['0.1.0-dev.12']);
+        await updater.check();
+        assert.equal(updater.downloaded.length, 2);
+        await updater.install();
+        assert.equal(updater.applied.length, 1);
+    });
+    test('a failed updater launch leaves installation retryable', async () => {
+        const options = {failApply:true};
+        const updater = tcnFixture(options);
+        await updater.check();
+        await assert.rejects(updater.install, /launcher unavailable/);
+        assert.equal(updater.applyState.attempt, null);
+        options.failApply = false;
+        await updater.install();
+        assert.equal(updater.applied.length, 1);
+    });
+    test('background requests are throttled but pending restart is still reported', async () => {
+        const updater = tcnFixture();
+        await updater.check('background');
+        await updater.check('focus');
+        assert.equal(updater.downloaded.length, 1);
+        assert.equal(updater.events.at(-1).type, 'downloaded');
+    });
+    test('network failure keeps installed app running', async () => {
+        const updater = tcnFixture({offline:true});
+        await updater.check();
+        assert.equal(updater.events.at(-1).phase, 'check');
+        assert.equal(updater.applied.length, 0);
+    });
 });

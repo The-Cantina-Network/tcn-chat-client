@@ -18,8 +18,8 @@ interface ChannelStorageDirectoryMap {
 }
 
 const channelStorageDirectoryMap: ChannelStorageDirectoryMap = {
-	stable: 'fluxer',
-	canary: 'fluxercanary',
+	stable: 'tcn-chat-desktop',
+	canary: 'tcn-chat-desktop-canary',
 };
 
 let portableMode = false;
